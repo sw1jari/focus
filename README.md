@@ -4,6 +4,14 @@ A website blocker for Linux that works at the DNS level. During your focus block
 
 Because the blocking happens in DNS rather than in a browser extension, it covers every browser, every profile and every app, and there is no extension to quietly turn off.
 
+![focus learn making a blocked site load](docs/focus-learn.gif)
+
+A blocked site, then `focus learn`: reload the page, press enter, keep the hosts you want and the page loads.
+
+![focus status, learn and pause in a terminal](docs/focus-terminal.gif)
+
+`focus status`, `focus learn` and the start of `focus pause`, with its sentence and countdown.
+
 ## How it works
 
 A systemd timer runs `focus tick` every minute. When the current time falls inside a block from `/etc/focus/schedule`, focus starts a dnsmasq instance that only forwards queries for allowlisted domains to your normal DNS servers and refuses everything else. An nftables rule redirects all outgoing DNS on port 53 to that dnsmasq, so programs can't go around it by using a different resolver. When the block ends, dnsmasq stops and the rule is removed.
