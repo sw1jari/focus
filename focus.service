@@ -1,0 +1,6 @@
+[Unit]
+Description=Focus schedule check
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/focus tick

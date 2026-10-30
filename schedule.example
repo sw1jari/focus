@@ -1,0 +1,4 @@
+# focus blocks, HH:MM-HH:MM in local time, the gaps between them are breaks
+# a block can cross midnight, like 22:00-02:00
+09:00-12:30
+13:30-17:30

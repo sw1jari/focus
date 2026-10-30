@@ -1,0 +1,8 @@
+table inet focus {
+    chain out {
+        type nat hook output priority -100; policy accept;
+        meta skuid "dnsmasq" return
+        udp dport 53 redirect to :5353
+        tcp dport 53 redirect to :5353
+    }
+}

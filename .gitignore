@@ -1,0 +1,5 @@
+# your own config, install.sh uses these instead of the examples when they exist
+allow.txt
+schedule
+until
+config

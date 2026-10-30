@@ -1,0 +1,261 @@
+#!/bin/sh
+# focus: during focus blocks only an allowlist of domains resolves.
+# Everything else fails at the DNS level for all programs.
+
+ETC=${FOCUS_ETC:-/etc/focus}
+RUN=${FOCUS_RUN:-/run/focus}
+UNIT=focus-dns.service
+SELF=$(readlink -f "$0")
+
+# defaults, overridden by /etc/focus/config
+SENTENCE="I am choosing distraction over my work"
+COOLDOWN=600
+PAUSE_MINUTES=30
+# shellcheck disable=SC1091
+[ -r "$ETC/config" ] && . "$ETC/config"
+COOLDOWN=${FOCUS_COOLDOWN:-$COOLDOWN}
+
+die() {
+    echo "focus: $*" >&2
+    exit 1
+}
+
+# runs focus again as root, with doas or sudo, whichever is installed
+as_root() {
+    if command -v doas >/dev/null; then
+        exec doas "$SELF" "$@"
+    elif command -v sudo >/dev/null; then
+        exec sudo "$SELF" "$@"
+    fi
+    die "this needs root, and neither doas nor sudo is installed"
+}
+
+need_root() {
+    [ "$(id -u)" -eq 0 ] && return 0
+    as_root "$@"
+}
+
+# the until file is optional, without it focus keeps following the schedule
+ended() {
+    [ -s "$ETC/until" ] && [ "$(date +%s)" -ge "$(date -d "$(cat "$ETC/until")" +%s)" ]
+}
+
+strip_zero() {
+    echo "${1#0}" | sed 's/^$/0/'
+}
+
+to_min() {
+    echo $(($(strip_zero "${1%:*}") * 60 + $(strip_zero "${1#*:}")))
+}
+
+now_min() {
+    if [ -n "$FOCUS_NOW" ]; then
+        to_min "$FOCUS_NOW"
+    else
+        to_min "$(date +%H:%M)"
+    fi
+}
+
+in_window() {
+    now=$(now_min)
+    while IFS= read -r line; do
+        case $line in
+            ''|'#'*) continue ;;
+        esac
+        s=$(to_min "${line%-*}")
+        e=$(to_min "${line#*-}")
+        if [ "$s" -le "$e" ]; then
+            [ "$now" -ge "$s" ] && [ "$now" -lt "$e" ] && return 0
+        else
+            { [ "$now" -ge "$s" ] || [ "$now" -lt "$e" ]; } && return 0
+        fi
+    done < "$ETC/schedule"
+    return 1
+}
+
+paused() {
+    [ -f "$RUN/pause" ] && [ "$(cat "$RUN/pause")" -gt "$(date +%s)" ]
+}
+
+upstreams() {
+    ips=$(nmcli -g IP4.DNS device show 2>/dev/null | grep -oE '[0-9]+(\.[0-9]+){3}' | awk '!seen[$0]++')
+    [ -n "$ips" ] || ips=$(sed -n 's/^nameserver[[:space:]]*//p' /etc/resolv.conf | grep -v '^127\.')
+    [ -n "$ips" ] || ips=1.1.1.1
+    echo "$ips"
+}
+
+# turns whatever was pasted (a full url, *.example.com, a port) into a bare hostname,
+# and drops anything that isn't a hostname so dnsmasq never sees junk
+clean() {
+    sed -e 's/#.*//' -e 's/[[:space:]]//g' \
+        -e 's|^[A-Za-z][A-Za-z0-9+.-]*://||' -e 's|[/?].*||' -e 's/:[0-9]*$//' \
+        -e 's/^\*\.//' -e 's/^\.//' -e 's/\.$//' |
+        tr 'A-Z' 'a-z' | grep -E '^[a-z0-9-]+(\.[a-z0-9-]+)+$'
+}
+
+domains() {
+    clean < "$ETC/allow.txt" | awk '!seen[$0]++'
+}
+
+gen_conf() {
+    ups=$(upstreams)
+    {
+        echo "listen-address=127.0.0.1,::1"
+        echo "port=5353"
+        echo "bind-interfaces"
+        echo "user=dnsmasq"
+        echo "no-resolv"
+        echo "no-hosts"
+        echo "log-queries"
+        echo "log-facility=-"
+        echo "local=/use-application-dns.net/"
+        for d in $(domains); do
+            for ip in $ups; do
+                echo "server=/$d/$ip"
+            done
+        done
+    } > "$ETC/dnsmasq.conf.new"
+    if cmp -s "$ETC/dnsmasq.conf.new" "$ETC/dnsmasq.conf"; then
+        rm -f "$ETC/dnsmasq.conf.new"
+        CHANGED=0
+    else
+        mv "$ETC/dnsmasq.conf.new" "$ETC/dnsmasq.conf"
+        CHANGED=1
+    fi
+}
+
+enable() {
+    gen_conf
+    if systemctl is-active --quiet "$UNIT"; then
+        [ "$CHANGED" = 1 ] && systemctl restart "$UNIT"
+    else
+        systemctl start "$UNIT"
+    fi
+    return 0
+}
+
+disable() {
+    systemctl is-active --quiet "$UNIT" && systemctl stop "$UNIT"
+    return 0
+}
+
+tick() {
+    if ended; then
+        disable
+        systemctl disable --now focus.timer
+        return 0
+    fi
+    if in_window && ! paused; then
+        enable
+    else
+        disable
+    fi
+}
+
+status() {
+    if systemctl is-active --quiet "$UNIT"; then
+        echo "focus is on, only allowlisted sites resolve"
+    else
+        echo "focus is off"
+    fi
+    if [ -f "$RUN/pause" ] && paused; then
+        echo "paused until $(date -d "@$(cat "$RUN/pause")" +%H:%M)"
+    fi
+    [ -s "$ETC/until" ] && echo "ends $(date -d "$(cat "$ETC/until")" '+%a %d %b %H:%M')"
+    echo "windows: $(grep -vE '^(#|$)' "$ETC/schedule" | tr '\n' ' ')"
+}
+
+pause() {
+    printf 'Type this sentence to continue:\n%s\n> ' "$SENTENCE"
+    read -r typed
+    [ "$typed" = "$SENTENCE" ] || die "not the same, staying focused"
+    left=$COOLDOWN
+    while [ "$left" -gt 0 ]; do
+        printf '\r%02d:%02d until the pause starts, ctrl-c to keep focusing ' $((left / 60)) $((left % 60))
+        sleep 1
+        left=$((left - 1))
+    done
+    printf '\n'
+    as_root _pause
+}
+
+blocked() {
+    journalctl -u "$UNIT" -o cat --since "${1:-30 min ago}" 2>/dev/null |
+        sed -n 's/.*query\[[A-Z]*\] \([^ ]*\) from.*/\1/p' |
+        awk -v allow="$(domains | tr '\n' ' ')" '
+            BEGIN { n = split(allow, a, " ") }
+            { ok = 0
+              for (i = 1; i <= n; i++)
+                  if ($0 == a[i] || index($0, "." a[i]) == length($0) - length(a[i])) ok = 1
+              if (!ok) c[$0]++ }
+            END { for (h in c) print c[h], h }' | sort -rn
+}
+
+# record what gets blocked while you reload a page, then pick which hosts to allow.
+# everything starts selected, so enter alone allows the lot
+learn() {
+    command -v fzf >/dev/null || die "learn needs fzf"
+    systemctl is-active --quiet "$UNIT" || die "focus is off right now, so nothing gets blocked to learn from"
+    start=$(date '+%Y-%m-%d %H:%M:%S')
+    printf 'recording, refresh the page in firefox and press enter when it is done loading '
+    read -r _ < /dev/tty
+    list=$(blocked "$start")
+    [ -n "$list" ] || die "nothing got blocked while recording"
+    picked=$(echo "$list" | fzf --multi --reverse --no-sort \
+        --bind 'load:select-all' --bind 'space:toggle+down' \
+        --header "tab or space to toggle, enter to allow the selected ones" |
+        awk '{print $2}')
+    [ -n "$picked" ] || exit 0
+    # shellcheck disable=SC2086
+    as_root allow $picked
+}
+
+case $1 in
+    tick)
+        need_root "$@"
+        tick
+        ;;
+    _pause)
+        need_root "$@"
+        mkdir -p "$RUN"
+        echo $(($(date +%s) + PAUSE_MINUTES * 60)) > "$RUN/pause"
+        tick
+        ;;
+    resume)
+        need_root "$@"
+        rm -f "$RUN/pause"
+        tick
+        ;;
+    pause)
+        pause
+        ;;
+    allow)
+        need_root "$@"
+        shift
+        [ $# -gt 0 ] || die "usage: focus allow domain..."
+        for d in "$@"; do
+            h=$(echo "$d" | clean)
+            if [ -z "$h" ]; then
+                echo "focus: skipping $d, not a hostname" >&2
+            elif domains | grep -qxF "$h"; then
+                echo "already allowed: $h"
+            else
+                echo "$h" >> "$ETC/allow.txt"
+                echo "allowed: $h"
+            fi
+        done
+        tick
+        ;;
+    blocked)
+        blocked "$2"
+        ;;
+    learn)
+        learn
+        ;;
+    status|'')
+        status
+        ;;
+    *)
+        die "usage: focus [status|pause|resume|allow domain...|blocked [since]|learn]"
+        ;;
+esac

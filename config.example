@@ -1,0 +1,8 @@
+# copied to /etc/focus/config, every setting is optional
+
+# what you have to type to start a pause
+SENTENCE="I am choosing distraction over my work"
+# seconds to wait after typing it, before the pause starts
+COOLDOWN=600
+# how long a pause lasts
+PAUSE_MINUTES=30

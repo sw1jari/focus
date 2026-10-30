@@ -1,0 +1,39 @@
+# one domain per line, subdomains are included, so github.com also allows api.github.com
+# full urls and *.example.com are fine too, focus strips them down to the hostname
+
+# code
+github.com
+githubusercontent.com
+githubassets.com
+
+# reading
+arxiv.org
+wikipedia.org
+wikimedia.org
+doi.org
+
+# microsoft login, for university or work accounts
+microsoft.com
+microsoftonline.com
+microsoftonline-p.com
+live.com
+msauth.net
+msftauth.net
+
+# cdns and fonts many sites load from
+cdnjs.cloudflare.com
+jsdelivr.net
+unpkg.com
+fonts.googleapis.com
+fonts.gstatic.com
+
+# certificate checks, without these https sites can hang
+lencr.org
+digicert.com
+sectigo.com
+globalsign.com
+amazontrust.com
+
+# system time and your distro's mirrors
+ntp.org
+archlinux.org
