@@ -197,7 +197,7 @@ learn() {
     command -v fzf >/dev/null || die "learn needs fzf"
     systemctl is-active --quiet "$UNIT" || die "focus is off right now, so nothing gets blocked to learn from"
     start=$(date '+%Y-%m-%d %H:%M:%S')
-    printf 'recording, refresh the page in firefox and press enter when it is done loading '
+    printf 'recording, reload the page in your browser and press enter when it is done loading '
     read -r _ < /dev/tty
     list=$(blocked "$start")
     [ -n "$list" ] || die "nothing got blocked while recording"
