@@ -28,7 +28,7 @@ sudo sh install.sh
 |---|---|
 | dnsmasq, nftables, systemd | The blocking itself |
 | fzf | `focus learn` |
-| NetworkManager | Finding your DNS servers, falls back to `/etc/resolv.conf` |
+| NetworkManager or systemd-resolved | Finding your DNS servers, falls back to `/etc/resolv.conf` |
 | doas or sudo | Commands that need root |
 
 The installer:
@@ -80,6 +80,7 @@ focus is a speed bump, not a lock. It doesn't stop:
 - DNS over TLS on port 853.
 - Hard coded IP addresses, or lookups a program already cached.
 - A VPN with its own resolver.
+- Containers and VMs with their own network, like Docker's default bridge.
 - Anyone with root.
 
 ## License

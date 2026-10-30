@@ -5,6 +5,8 @@
 ETC=${FOCUS_ETC:-/etc/focus}
 RUN=${FOCUS_RUN:-/run/focus}
 UNIT=focus-dns.service
+# where the filtering dnsmasq listens, all DNS on port 53 gets redirected here
+PORT=53530
 SELF=$(readlink -f "$0")
 
 # defaults, overridden by /etc/focus/config
@@ -77,8 +79,10 @@ paused() {
     [ -f "$RUN/pause" ] && [ "$(cat "$RUN/pause")" -gt "$(date +%s)" ]
 }
 
+# the real DNS servers: from NetworkManager, else systemd-resolved, else resolv.conf
 upstreams() {
     ips=$(nmcli -g IP4.DNS device show 2>/dev/null | grep -oE '[0-9]+(\.[0-9]+){3}' | awk '!seen[$0]++')
+    [ -n "$ips" ] || ips=$(resolvectl dns 2>/dev/null | grep -oE '[0-9]+(\.[0-9]+){3}' | grep -v '^127\.' | awk '!seen[$0]++')
     [ -n "$ips" ] || ips=$(sed -n 's/^nameserver[[:space:]]*//p' /etc/resolv.conf | grep -v '^127\.')
     [ -n "$ips" ] || ips=1.1.1.1
     echo "$ips"
@@ -101,7 +105,7 @@ gen_conf() {
     ups=$(upstreams)
     {
         echo "listen-address=127.0.0.1,::1"
-        echo "port=5353"
+        echo "port=$PORT"
         echo "bind-interfaces"
         echo "user=dnsmasq"
         echo "no-resolv"
@@ -124,12 +128,18 @@ gen_conf() {
     fi
 }
 
+# systemd-resolved would keep answering from its cache for blocked sites
+flush_cache() {
+    command -v resolvectl >/dev/null && resolvectl flush-caches 2>/dev/null
+    return 0
+}
+
 enable() {
     gen_conf
     if systemctl is-active --quiet "$UNIT"; then
-        [ "$CHANGED" = 1 ] && systemctl restart "$UNIT"
+        [ "$CHANGED" = 1 ] && systemctl restart "$UNIT" && flush_cache
     else
-        systemctl start "$UNIT"
+        systemctl start "$UNIT" && flush_cache
     fi
     return 0
 }

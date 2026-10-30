@@ -4,6 +4,6 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/dnsmasq --keep-in-foreground --conf-file=/etc/focus/dnsmasq.conf --pid-file=
-ExecStartPost=/bin/sh -c "sleep 1; exec /usr/bin/nft -f /etc/focus/redirect.nft"
-ExecStopPost=-/usr/bin/nft delete table inet focus
+ExecStart=dnsmasq --keep-in-foreground --conf-file=/etc/focus/dnsmasq.conf --pid-file=
+ExecStartPost=/bin/sh -c "sleep 1; exec nft -f /etc/focus/redirect.nft"
+ExecStopPost=-nft delete table inet focus
