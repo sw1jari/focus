@@ -54,6 +54,8 @@ elif ! grep -q DNSOverHTTPS "$policy"; then
 fi
 
 systemctl daemon-reload
+# a running dnsmasq keeps the old redirect rules until it restarts
+systemctl try-restart focus-dns.service
 systemctl enable --now focus.timer
 focus tick
 focus status
