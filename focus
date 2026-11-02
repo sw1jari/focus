@@ -8,11 +8,19 @@ UNIT=focus-dns.service
 # where the filtering dnsmasq listens, all DNS on port 53 gets redirected here
 PORT=53530
 SELF=$(readlink -f "$0")
+# focus run puts commands in this slice, and the focus_run table marks their dns
+SLICE=focusbypass.slice
+MARK=0xf0c5
+# lets the run tests use a user manager instead of the system one
+BUS=${FOCUS_BUS:---system}
 
 # defaults, overridden by /etc/focus/config
 SENTENCE="I am choosing distraction over my work"
+ALLOW_SENTENCE="I am not adding anything that could distract me from what I need to do"
+RUN_SENTENCE="I am running this for my work, not to get around focus"
 COOLDOWN=600
 PAUSE_MINUTES=30
+RUN_COMMANDS="pacman yay paru makepkg go pip"
 # shellcheck disable=SC1091
 [ -r "$ETC/config" ] && . "$ETC/config"
 COOLDOWN=${FOCUS_COOLDOWN:-$COOLDOWN}
@@ -22,14 +30,21 @@ die() {
     exit 1
 }
 
-# runs focus again as root, with doas or sudo, whichever is installed
-as_root() {
+# doas or sudo, whichever is installed
+root_cmd() {
     if command -v doas >/dev/null; then
-        exec doas "$SELF" "$@"
+        echo doas
     elif command -v sudo >/dev/null; then
-        exec sudo "$SELF" "$@"
+        echo sudo
+    else
+        die "this needs root, and neither doas nor sudo is installed"
     fi
-    die "this needs root, and neither doas nor sudo is installed"
+}
+
+# runs focus again as root
+as_root() {
+    cmd=$(root_cmd) || exit 1
+    exec "$cmd" "$SELF" "$@"
 }
 
 need_root() {
@@ -175,10 +190,15 @@ status() {
     echo "windows: $(grep -vE '^(#|$)' "$ETC/schedule" | tr '\n' ' ')"
 }
 
+# makes you type a sentence, read from the terminal so a pipe can't answer it
+confirm() {
+    printf 'Type this sentence to continue:\n%s\n> ' "$1"
+    read -r typed < /dev/tty
+    [ "$typed" = "$1" ] || die "not the same, $2"
+}
+
 pause() {
-    printf 'Type this sentence to continue:\n%s\n> ' "$SENTENCE"
-    read -r typed
-    [ "$typed" = "$SENTENCE" ] || die "not the same, staying focused"
+    confirm "$SENTENCE" "staying focused"
     left=$COOLDOWN
     while [ "$left" -gt 0 ]; do
         printf '\r%02d:%02d until the pause starts, ctrl-c to keep focusing ' $((left / 60)) $((left % 60))
@@ -217,7 +237,117 @@ learn() {
         awk '{print $2}')
     [ -n "$picked" ] || exit 0
     # shellcheck disable=SC2086
-    as_root allow $picked
+    exec "$SELF" allow $picked
+}
+
+allowed_cmd() {
+    case " $RUN_COMMANDS " in
+        *" $1 "*) return 0 ;;
+    esac
+    return 1
+}
+
+# runs one of RUN_COMMANDS with the real DNS, for installs and updates during focus.
+# root moves this very process into the bypass slice, then it becomes the command
+run() {
+    [ $# -gt 0 ] || die "usage: focus run command [args]"
+    path=$(command -v "$1") || die "$1 is not installed"
+    allowed_cmd "${path##*/}" || die "$1 is not in RUN_COMMANDS, see $ETC/config"
+    real=$(readlink -f "$path")
+    case $path in
+        /usr/bin/*|/usr/sbin/*|/bin/*|/sbin/*) ;;
+        *) die "$path is not installed by the system, so it can't run with the real DNS" ;;
+    esac
+    [ "$(stat -c %u "$real")" = 0 ] || die "$real is not owned by root"
+    echo "running with the real DNS: $*"
+    confirm "$RUN_SENTENCE" "not running it"
+    if [ "$(id -u)" -eq 0 ]; then
+        "$SELF" _bypass || exit 1
+    else
+        cmd=$(root_cmd) || exit 1
+        "$cmd" "$SELF" _bypass || exit 1
+    fi
+    echo "focus: $1 has the real DNS until it exits"
+    shift
+    # ctrl-c goes to the command, this shell waits for it to finish
+    trap : INT
+    "$path" "$@"
+    status=$?
+    cleanup_scope
+    exit "$status"
+}
+
+# stops whatever the command left running in the scope, like a background agent,
+# so the real DNS ends with the command
+cleanup_scope() {
+    procs=/sys/fs/cgroup$(sed -n 's/^0:://p' /proc/$$/cgroup)/cgroup.procs
+    [ -r "$procs" ] || return 0
+    for pid in $(cat "$procs"); do
+        [ "$pid" = $$ ] || kill "$pid" 2>/dev/null
+    done
+    sleep 1
+    for pid in $(cat "$procs"); do
+        [ "$pid" = $$ ] || kill -9 "$pid" 2>/dev/null
+    done
+}
+
+# true if pid is a focus run of an allowed command
+is_run() {
+    [ "$(readlink "/proc/$1/exe")" = "$(readlink -f /bin/sh)" ] || return 1
+    args=$(tr '\0' '\n' < "/proc/$1/cmdline")
+    script=$(echo "$args" | sed -n 2p)
+    [ "$(echo "$args" | sed -n 3p)" = run ] || return 1
+    allowed_cmd "$(echo "$args" | sed -n 4p | sed 's|.*/||')" || return 1
+    [ "$(cd "/proc/$1/cwd" 2>/dev/null && readlink -f "$script")" = "$SELF" ]
+}
+
+# root half of focus run. the pid is never taken as an argument, it's the focus run
+# process that started us, found through the parents (doas execs, sudo forks)
+bypass() {
+    pid=
+    p=$PPID
+    for _ in 1 2 3 4; do
+        [ "$p" -gt 1 ] 2>/dev/null || break
+        if is_run "$p"; then
+            pid=$p
+            break
+        fi
+        p=$(awk '/^PPid:/ { print $2 }' "/proc/$p/status")
+    done
+    [ -n "$pid" ] || die "_bypass only works when started by focus run"
+    unit=focus-run-$pid.scope
+    busctl "$BUS" call org.freedesktop.systemd1 /org/freedesktop/systemd1 \
+        org.freedesktop.systemd1.Manager StartTransientUnit 'ssa(sv)a(sa(sv))' \
+        "$unit" fail 3 \
+        PIDs au 1 "$pid" \
+        Slice s "$SLICE" \
+        Description s "focus run" \
+        0 > /dev/null || die "could not start $unit"
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+        grep -q "/$unit\$" "/proc/$pid/cgroup" && break
+        sleep 0.2
+    done
+    cg=$(sed -n 's/^0:://p' "/proc/$pid/cgroup")
+    case $cg in
+        */"$SLICE/$unit") ;;
+        *) die "$unit did not get the process" ;;
+    esac
+    slice=${cg%/*}
+    slice=${slice#/}
+    level=$(echo "$slice" | awk -F/ '{ print NF }')
+    # nft finds the cgroup when the rule loads, so the slice has to exist by now.
+    # recreated every run, in case systemd made the slice anew in between
+    nft -f - <<EOF || die "could not add the focus_run table"
+table inet focus_run
+delete table inet focus_run
+table inet focus_run {
+    chain out {
+        type filter hook output priority -150; policy accept;
+        udp dport 53 socket cgroupv2 level $level "$slice" meta mark set $MARK
+        tcp dport 53 socket cgroupv2 level $level "$slice" meta mark set $MARK
+    }
+}
+EOF
 }
 
 case $1 in
@@ -240,9 +370,18 @@ case $1 in
         pause
         ;;
     allow)
-        need_root "$@"
         shift
         [ $# -gt 0 ] || die "usage: focus allow domain..."
+        echo "allowing: $*"
+        confirm "$ALLOW_SENTENCE" "nothing allowed"
+        if [ "$(id -u)" -eq 0 ]; then
+            exec "$SELF" _allow "$@"
+        fi
+        as_root _allow "$@"
+        ;;
+    _allow)
+        need_root "$@"
+        shift
         for d in "$@"; do
             h=$(echo "$d" | clean)
             if [ -z "$h" ]; then
@@ -262,10 +401,18 @@ case $1 in
     learn)
         learn
         ;;
+    run)
+        shift
+        run "$@"
+        ;;
+    _bypass)
+        need_root "$@"
+        bypass
+        ;;
     status|'')
         status
         ;;
     *)
-        die "usage: focus [status|pause|resume|allow domain...|blocked [since]|learn]"
+        die "usage: focus [status|pause|resume|allow domain...|blocked [since]|learn|run command]"
         ;;
 esac

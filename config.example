@@ -6,3 +6,9 @@ SENTENCE="I am choosing distraction over my work"
 COOLDOWN=600
 # how long a pause lasts
 PAUSE_MINUTES=30
+# what you have to type before focus allow, and so focus learn, adds anything
+ALLOW_SENTENCE="I am not adding anything that could distract me from what I need to do"
+# what you have to type before focus run
+RUN_SENTENCE="I am running this for my work, not to get around focus"
+# commands focus run lets through to the real DNS, they have to be installed by the system
+RUN_COMMANDS="pacman yay paru makepkg go pip"
