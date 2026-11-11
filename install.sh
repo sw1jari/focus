@@ -25,6 +25,7 @@ if ! getent passwd dnsmasq >/dev/null; then
 fi
 
 install -Dm755 focus /usr/local/bin/focus
+install -Dm755 focusmenu /usr/local/bin/focusmenu
 install -d /etc/focus
 
 # your own copy next to this script wins over the example

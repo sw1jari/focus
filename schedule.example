@@ -1,4 +1,5 @@
-# focus blocks, HH:MM-HH:MM in local time, the gaps between them are breaks
-# a block can cross midnight, like 22:00-02:00
-09:00-12:30
-13:30-17:30
+# focus blocks, [days] HH:MM-HH:MM in local time, the gaps between them are breaks
+# days are optional, like mon-fri or sat,sun, no days means every day
+# a block can cross midnight, like 22:00-02:00, and belongs to the day it starts on
+mon-fri 09:00-12:30
+mon-fri 13:30-17:30

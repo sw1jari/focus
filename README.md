@@ -52,6 +52,8 @@ If `focus blocked` shows nothing, add yourself to the `systemd-journal` group.
 | `focus learn` | Records what gets blocked while you reload a page, then lets you pick what to allow |
 | `focus allow github.com` | Adds domains to the allowlist right away |
 | `focus blocked "30 min ago"` | Lists blocked domains and how often they were asked for |
+| `focus start 1h30m` | Turns focus on right now for that long, whatever the schedule says. Takes `90m`, `1 h`, `45s`, `1h 30m`, a bare number is minutes. It ignores pauses and can only be made longer |
+| `focusmenu` | Same as `focus start`, but asks for the time in dmenu |
 | `focus pause` | Type the sentence, wait out the countdown, then a pause (30 minutes by default) |
 | `focus resume` | Ends a pause early |
 | `focus run yay -Syu` | Runs an update or install with the real DNS, see below |
@@ -82,7 +84,7 @@ Everything lives in `/etc/focus`.
 
 | File | Contents |
 |---|---|
-| `schedule` | One focus block per line, `HH:MM-HH:MM`, may cross midnight |
+| `schedule` | One focus block per line, `HH:MM-HH:MM`, may cross midnight. Start a line with days like `mon-fri` to limit it, no days means every day |
 | `allow.txt` | One domain per line, subdomains included, `#` for comments |
 | `config` | The sentences, pause countdown and length, and the `focus run` commands, see `config.example` |
 | `until` | Optional end date like `2026-11-03 13:30`, focus turns itself off then |

@@ -1,0 +1,21 @@
+#!/bin/sh
+# dmenu front end for focus: type how long, like 1s, 10m, 30 m, 1h30m or 1 h,
+# and a focus session starts right now and ends by itself.
+# Runs `focus start`, so it needs root; if doas wants a password a terminal opens for it.
+
+notify() {
+    command -v dunstify >/dev/null && dunstify -a focus "focus" "$1" || echo "$1"
+}
+
+time=$(printf '' | dmenu -p "focus for (e.g. 10m, 1h, 1h30m):") || exit 0
+[ -n "$time" ] || exit 0
+
+# without a doas rule this fails quietly, then a terminal opens so doas can ask for the password
+if out=$(FOCUS_NOPROMPT=1 focus start "$time" 2>&1); then
+    notify "$(printf '%s\n' "$out" | grep -E '^session')"
+elif printf '%s' "$out" | grep -q "^focus: "; then
+    notify "$out"
+    exit 1
+else
+    exec "${TERMINAL:-st}" -e sh -c 'focus start "$1" || { printf "press enter "; read -r _; }' sh "$time"
+fi

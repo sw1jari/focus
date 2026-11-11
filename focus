@@ -73,21 +73,97 @@ now_min() {
     fi
 }
 
+day_num() {
+    case $1 in
+        mon*|1) echo 1 ;; tue*|2) echo 2 ;; wed*|3) echo 3 ;; thu*|4) echo 4 ;;
+        fri*|5) echo 5 ;; sat*|6) echo 6 ;; sun*|7) echo 7 ;; *) echo 0 ;;
+    esac
+}
+
+# does day number $2 (1 is monday) fit a spec like mon-fri or sat,sun
+day_match() {
+    (
+        IFS=,
+        for part in $1; do
+            a=$(day_num "${part%-*}")
+            z=$(day_num "${part#*-}")
+            if [ "$a" -le "$z" ]; then
+                [ "$2" -ge "$a" ] && [ "$2" -le "$z" ] && exit 0
+            else
+                { [ "$2" -ge "$a" ] || [ "$2" -le "$z" ]; } && exit 0
+            fi
+        done
+        exit 1
+    )
+}
+
+# schedule lines are HH:MM-HH:MM, optionally led by days like mon-fri. a window that
+# runs past midnight belongs to the day it starts on
 in_window() {
     now=$(now_min)
+    today=${FOCUS_DAY:-$(date +%u)}
+    yesterday=$((today - 1))
+    [ "$yesterday" -eq 0 ] && yesterday=7
     while IFS= read -r line; do
         case $line in
             ''|'#'*) continue ;;
         esac
-        s=$(to_min "${line%-*}")
-        e=$(to_min "${line#*-}")
-        if [ "$s" -le "$e" ]; then
-            [ "$now" -ge "$s" ] && [ "$now" -lt "$e" ] && return 0
+        # shellcheck disable=SC2086
+        set -- $line
+        if [ $# -ge 2 ]; then
+            days=$1
+            range=$2
         else
-            { [ "$now" -ge "$s" ] || [ "$now" -lt "$e" ]; } && return 0
+            days=mon-sun
+            range=$1
+        fi
+        s=$(to_min "${range%-*}")
+        e=$(to_min "${range#*-}")
+        if [ "$s" -le "$e" ]; then
+            [ "$now" -ge "$s" ] && [ "$now" -lt "$e" ] && day_match "$days" "$today" && return 0
+        else
+            [ "$now" -ge "$s" ] && day_match "$days" "$today" && return 0
+            [ "$now" -lt "$e" ] && day_match "$days" "$yesterday" && return 0
         fi
     done < "$ETC/schedule"
     return 1
+}
+
+# a session is a block started by hand with focus start, it ignores the schedule and pauses
+session_end() {
+    [ -f "$RUN/session" ] && cat "$RUN/session"
+}
+
+in_session() {
+    end=$(session_end) && [ "$end" -gt "$(date +%s)" ] 2>/dev/null
+}
+
+# turns 1h30m, 10 m, 1 h, 90s, 45min or a bare number of minutes into seconds
+parse_duration() {
+    printf '%s' "$*" | tr 'A-Z' 'a-z' | sed -e 's/[[:space:],]//g' \
+        -e 's/hours\?/h/g' -e 's/hrs\?/h/g' -e 's/minutes\?/m/g' -e 's/mins\?/m/g' \
+        -e 's/seconds\?/s/g' -e 's/secs\?/s/g' |
+        awk '
+            /^[0-9]+$/ { print $0 * 60; exit }
+            /^([0-9]+[hms])+$/ {
+                s = $0; t = 0
+                while (match(s, /^[0-9]+[hms]/)) {
+                    n = substr(s, 1, RLENGTH - 1) + 0
+                    u = substr(s, RLENGTH, 1)
+                    t += n * (u == "h" ? 3600 : u == "m" ? 60 : 1)
+                    s = substr(s, RLENGTH + 1)
+                }
+                print t; exit
+            }
+            { exit 1 }'
+}
+
+fmt_left() {
+    s=$1
+    [ "$s" -ge 3600 ] && printf '%dh' $((s / 3600)) && s=$((s % 3600))
+    [ "$s" -ge 60 ] && printf '%dm' $((s / 60)) && s=$((s % 60))
+    [ "$s" -gt 0 ] || [ "$1" -eq 0 ] && printf '%ds' "$s"
+    return 0
 }
 
 paused() {
@@ -165,6 +241,11 @@ disable() {
 }
 
 tick() {
+    if in_session; then
+        enable
+        return 0
+    fi
+    [ -f "$RUN/session" ] && rm -f "$RUN/session"
     if ended; then
         disable
         systemctl disable --now focus.timer
@@ -183,11 +264,66 @@ status() {
     else
         echo "focus is off"
     fi
+    if in_session; then
+        left=$(($(session_end) - $(date +%s)))
+        echo "session until $(date -d "@$(session_end)" +%H:%M:%S), $(fmt_left "$left") left"
+    fi
     if [ -f "$RUN/pause" ] && paused; then
         echo "paused until $(date -d "@$(cat "$RUN/pause")" +%H:%M)"
     fi
     [ -s "$ETC/until" ] && echo "ends $(date -d "$(cat "$ETC/until")" '+%a %d %b %H:%M')"
     echo "windows: $(grep -vE '^(#|$)' "$ETC/schedule" | tr '\n' ' ')"
+}
+
+# when the state next changes, for the status bar: "on 08:00" means focus is on until
+# then, "off 09:00" means it's off until then, with a weekday when it isn't today.
+# "on -" means nothing changes in the next week
+next_change() {
+    sess=0
+    if in_session; then
+        sess=$(( ($(session_end) - $(date +%s) + 59) / 60 ))
+    fi
+    now=$(now_min)
+    grep -vE '^[[:space:]]*(#|$)' "$ETC/schedule" 2>/dev/null |
+        awk -v now="$now" -v dow="${FOCUS_DAY:-$(date +%u)}" -v sess="$sess" '
+        function dn(x) { x = substr(tolower(x), 1, 3)
+            return (x=="mon")?1:(x=="tue")?2:(x=="wed")?3:(x=="thu")?4:(x=="fri")?5:(x=="sat")?6:(x=="sun")?7:0 }
+        function hm(x, a) { split(x, a, ":"); return a[1] * 60 + a[2] }
+        {
+            if (NF >= 2) { spec = $1; range = $2 } else { spec = "mon-sun"; range = $1 }
+            n++; split(range, r, "-"); s[n] = hm(r[1]); e[n] = hm(r[2])
+            c = split(spec, parts, ",")
+            for (i = 1; i <= c; i++) {
+                if (split(parts[i], ab, "-") == 2) { a = dn(ab[1]); z = dn(ab[2]) } else { a = z = dn(parts[i]) }
+                for (d = a; ; d = d % 7 + 1) { ok[n, d] = 1; if (d == z) break }
+            }
+        }
+        function winon(m,   t, d, y, k, mm) {
+            t = now + m; d = (dow - 1 + int(t / 1440)) % 7 + 1; mm = t % 1440
+            y = (d + 5) % 7 + 1
+            for (k = 1; k <= n; k++) {
+                if (s[k] <= e[k]) { if (mm >= s[k] && mm < e[k] && ok[k, d]) return 1 }
+                else {
+                    if (mm >= s[k] && ok[k, d]) return 1
+                    if (mm < e[k] && ok[k, y]) return 1
+                }
+            }
+            return 0
+        }
+        function state(m) { return (m < sess || winon(m)) ? 1 : 0 }
+        END {
+            cur = state(0)
+            split("Mon Tue Wed Thu Fri Sat Sun", names, " ")
+            for (m = 1; m <= 10080; m++) {
+                if (state(m) != cur) {
+                    t = now + m; day = int(t / 1440); mm = t % 1440
+                    out = sprintf("%02d:%02d", int(mm / 60), mm % 60)
+                    if (day > 0) out = out " " names[(dow - 1 + day) % 7 + 1]
+                    print (cur ? "on " : "off ") out; exit
+                }
+            }
+            print (cur ? "on -" : "off -")
+        }'
 }
 
 # makes you type a sentence, read from the terminal so a pipe can't answer it
@@ -361,6 +497,40 @@ case $1 in
         echo $(($(date +%s) + PAUSE_MINUTES * 60)) > "$RUN/pause"
         tick
         ;;
+    start)
+        shift
+        [ $# -gt 0 ] || die "usage: focus start 1h30m"
+        secs=$(parse_duration "$@") || die "can't read '$*' as a time, try 90m, 1h30m or 45s"
+        [ "${secs:-0}" -gt 0 ] || die "can't read '$*' as a time, try 90m, 1h30m or 45s"
+        if [ "$(id -u)" -eq 0 ]; then
+            exec "$SELF" _start "$secs" < /dev/null
+        fi
+        # the seconds go in on stdin, so one fixed doas rule (args _start) can cover it.
+        # starting focus only ever restricts, so that rule can be passwordless
+        cmd=$(root_cmd) || exit 1
+        if ! echo "$secs" | "$cmd" -n "$SELF" _start 2>/dev/null; then
+            [ -n "$FOCUS_NOPROMPT" ] && exit 1
+            echo "$secs" | "$cmd" "$SELF" _start
+        fi
+        ;;
+    _start)
+        need_root "$@"
+        read -r secs || secs=$2
+        case $secs in
+            ''|*[!0-9]*) die "_start wants a number of seconds" ;;
+        esac
+        [ "$secs" -gt 0 ] || die "that's no time at all"
+        mkdir -p "$RUN"
+        end=$(($(date +%s) + secs))
+        # a running session can only get longer, otherwise start would be a way out
+        old=$(session_end) && in_session && [ "$old" -ge "$end" ] && end=$old
+        echo "$end" > "$RUN/session"
+        # one tick at the end, so it switches off on time and not at the next minute
+        systemctl stop focus-session-end.timer 2>/dev/null
+        systemd-run --quiet --unit=focus-session-end --on-active="$((end - $(date +%s)))s" "$SELF" tick
+        tick
+        status
+        ;;
     resume)
         need_root "$@"
         rm -f "$RUN/pause"
@@ -410,6 +580,9 @@ case $1 in
         done
         tick
         ;;
+    times)
+        next_change
+        ;;
     blocked)
         blocked "$2"
         ;;
@@ -428,6 +601,6 @@ case $1 in
         status
         ;;
     *)
-        die "usage: focus [status|pause|resume|allow domain...|blocked [since]|learn|run command]"
+        die "usage: focus [status|start time|pause|resume|allow domain...|blocked [since]|learn|run command]"
         ;;
 esac
