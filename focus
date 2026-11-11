@@ -372,6 +372,21 @@ case $1 in
     allow)
         shift
         [ $# -gt 0 ] || die "usage: focus allow domain..."
+        # drop anything already allowed before asking for the sentence,
+        # allow.txt is world-readable so this needs no root
+        have=$(domains)
+        todo=""
+        for d in "$@"; do
+            h=$(echo "$d" | clean)
+            if [ -n "$h" ] && echo "$have" | grep -qxF "$h"; then
+                echo "already allowed: $h"
+            else
+                todo="$todo $d"
+            fi
+        done
+        # shellcheck disable=SC2086
+        set -- $todo
+        [ $# -gt 0 ] || exit 0
         echo "allowing: $*"
         confirm "$ALLOW_SENTENCE" "nothing allowed"
         if [ "$(id -u)" -eq 0 ]; then
